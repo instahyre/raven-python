@@ -549,7 +549,7 @@ class Client(object):
         self.error_logger.error('Failed to submit message: %r', message)
         self.state.set_fail(retry_after=retry_after)
 
-    def send_remote(self, url, data, headers=None):
+    def send_remote(self, url, data, headers=None, raw_data=None):
         # If the client is configured to raise errors on sending,
         # the implication is that the backoff and retry strategies
         # will be handled by the calling application
@@ -560,10 +560,53 @@ class Client(object):
             self.error_logger.error(message)
             return
 
-        self.logger.debug('Sending message of length %d to %s', len(data), url)
-
         def failed_send(e):
             self._failed_send(e, url, data)
+
+        # T6322: Don't send 404s to Sentry
+        # However, make sure that API based 404s don't get skipped.
+        # Prevent both Not Found and Page Not Found messages from showing up
+        # on Sentry.
+        if raw_data is None:
+            raw_data = {}
+
+        request = raw_data.get('request', None)
+        status_code = raw_data.get('extra', {}).get('status_code', None)
+        error_logger = raw_data.get('logger', None)
+
+        if request is not None and '/api/' not in request['url'] and \
+                ((status_code is not None and status_code == 404) or \
+                 error_logger == 'http404'):
+            return
+
+        # T7013: Prevent the following errors from showing up on Sentry
+        message = raw_data.get('message', "")
+
+        if 'exception' in raw_data and 'values' in raw_data['exception']:
+            # If exception context values are present, use those to fetch the
+            # message. This is because Sentry doesn't always store the actual
+            # exception message under raw_data['message']. It can also present
+            # the top level error message (for e.g. "Internal Server Error") in
+            # that key, which makes them less accurate.
+            for error_context in raw_data['exception']['values']:
+                message = error_context['value']
+                break
+
+        messages_to_ignore = [
+            u"KeyError: 'partial_pipeline'",
+            u"TypeError: argument of type 'NoneType' is not iterable",
+            u"NotFound: Invalid resource lookup data provided (mismatched type)",
+            u"Forbidden (CSRF token missing or incorrect.)"
+        ]
+
+        for msg in messages_to_ignore:
+            if msg.lower() in message.lower() or message.lower() in msg.lower():
+                return
+
+        if status_code == 401:
+            return
+
+        self.logger.debug('Sending message of length %d to %s', len(data), url)
 
         try:
             parsed = urlparse(url)
@@ -586,7 +629,8 @@ class Client(object):
         """
         message = self.encode(data)
 
-        return self.send_encoded(message, auth_header=auth_header)
+        return self.send_encoded(message, auth_header=auth_header,
+                                 raw_data=data)
 
     def send_encoded(self, message, auth_header=None, **kwargs):
         """
@@ -613,7 +657,8 @@ class Client(object):
                 'Content-Type': 'application/octet-stream',
             }
 
-            self.send_remote(url=url, data=message, headers=headers)
+            self.send_remote(url=url, data=message, headers=headers,
+                             raw_data=kwargs.get('raw_data'))
 
     def encode(self, data):
         """
@@ -651,6 +696,7 @@ class Client(object):
 
         ``kwargs`` are passed through to ``.capture``.
         """
+
         return self.capture(
             'raven.events.Exception', exc_info=exc_info, **kwargs)
 
