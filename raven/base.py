@@ -12,6 +12,7 @@ import base64
 import zlib
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -596,11 +597,28 @@ class Client(object):
             u"KeyError: 'partial_pipeline'",
             u"TypeError: argument of type 'NoneType' is not iterable",
             u"NotFound: Invalid resource lookup data provided (mismatched type)",
+            u"Invalid resource lookup data provided (mismatched type)",
             u"Forbidden (CSRF token missing or incorrect.)"
+        ]
+
+        regex_messages = [
+            r"PdfReadWarning.*", r"Superfluous whitespace.*",
+            r"SNIMissingWarning: An HTTPS request has.*",
+            r"An HTTPS request has.*",
+            r"InsecurePlatformWarning: A true SSLContext.*",
+            r"A true SSLContext is not available.*",
+            r"RuntimeWarning: DateTimeField.*",
+            r"DateTimeField.*received a naive datetime.*",
+            r"DeprecationWarning: integer argument expected.*"
+            r"integer argument expected, got float.*"
         ]
 
         for msg in messages_to_ignore:
             if msg.lower() in message.lower() or message.lower() in msg.lower():
+                return
+
+        for re_msg in regex_messages:
+            if re.match(re_msg, message):
                 return
 
         if status_code == 401:
